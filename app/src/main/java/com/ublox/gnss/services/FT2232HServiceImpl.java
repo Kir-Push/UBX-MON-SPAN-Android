@@ -1,12 +1,22 @@
 package com.ublox.gnss.services;
 
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Color;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbManager;
+import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
+import android.util.Pair;
 import android.widget.Toast;
 
 import com.ftdi.j2xx.D2xxManager;
@@ -19,6 +29,7 @@ import com.github.mikephil.charting.data.Entry;
 import com.github.mikephil.charting.data.LineData;
 import com.github.mikephil.charting.data.LineDataSet;
 import com.ublox.gnss.R;
+import com.ublox.gnss.driver.FTDI_Constants;
 import com.ublox.gnss.messages.MonSpanMsg;
 import com.ublox.gnss.messages.RfMsg;
 import com.ublox.gnss.parsers.NMEAParser;
@@ -27,16 +38,31 @@ import com.ublox.gnss.utils.UnsignedOperation;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-public class FT2232HServiceImpl implements FTService {
+public class FT2232HServiceImpl extends Service implements FTService {
+
+    public static final String TAG = "UsbService";
+
+    private static final String ACTION_USB_PERMISSION = "com.android.example.USB_PERMISSION";
+    public static final String ACTION_USB_ATTACHED = "android.hardware.usb.action.USB_DEVICE_ATTACHED";
+    public static final String ACTION_USB_DETACHED = "android.hardware.usb.action.USB_DEVICE_DETACHED";
+    public static final String ACTION_USB_PERMISSION_GRANTED = "com.gnss.usbservice.USB_PERMISSION_GRANTED";
+    public static final String ACTION_USB_PERMISSION_NOT_GRANTED = "com.gnss.usbservice.USB_PERMISSION_NOT_GRANTED";
+    public static final String ACTION_USB_DISCONNECTED = "com.gnss.usbservice.USB_DISCONNECTED";
+    public static final String ACTION_NO_USB = "com.gnss.usbservice.NO_USB";
 
     public static final String MON_SPAN = "MON-SPAN";
     public static final String MON_RF = "MON-RF";
     public static final String TYPE = "TYPE";
+
+    public static boolean SERVICE_CONNECTED = false;
 
     private Context deviceFT2232HContext;
 
@@ -48,92 +74,169 @@ public class FT2232HServiceImpl implements FTService {
     private NMEAParser nmeaParser;
     private UBXParser ubxParser;
     private D2xxManager ftdid2xx;
+    private UsbManager usbManager;
+    private UsbDevice usbDevice;
+    private Handler handler;
 
     private int devCount = -1;
-    private int currentIndex = -1;
+    private static boolean serialPortConnected = true;
 
     private static int iEnableReadFlag = 1;
     private byte stopBit; /*1:1stop bits, 2:2 stop bits*/
     private byte dataBit; /*8:8bit, 7: 7bit*/
     private byte parity;  /* 0: none, 1: odd, 2: even, 3: mark, 4: space*/
     private byte flowControl; /*0:none, 1: flow control(CTS,RTS)*/
-    private int portNumber; /*port number*/
 
 
     /*device 1*/
     private byte[] readData_0;
-    private char[] readDataToText_0;
     public int iavailable_0 = 0;
     public boolean bReadThreadGoing_0 = false;
-  //  private UsbSerialPort port_0;
     private FT_Device port_0;
-
-    public LineChart chart;
-    public BarChart barChart;
 
     /*device 2*/
     private byte[] readData_1;
-    private char[] readDataToText_1;
     public int iavailable_1 = 0;
     public boolean bReadThreadGoing_1 = false;
-  //  private UsbSerialPort port_1;
     private FT_Device port_1;
-
-    private LineChart chart_1;
-    private BarChart barChart_1;
 
     private static final int MON_SPAN_SIZE = 284;
     private static final int MON_RF_SIZE = 36;
 
-    private final ScheduledExecutorService worker;
+    private static final ScheduledExecutorService worker = Executors.newScheduledThreadPool(3);;
 
+    private IBinder binder = new UsbBinder();
 
-    public FT2232HServiceImpl(Context parentContext, D2xxManager ftdid2xx, LineChart chart, LineChart chart_1, BarChart barChart, BarChart barChart_1) {
-        this.nmeaParser = new NMEAParser();
-        this.ubxParser = new UBXParser();
-        this.deviceFT2232HContext = parentContext;
-        this.ftdid2xx = ftdid2xx;
+    public class UsbBinder extends Binder {
+        public FT2232HServiceImpl getService() {
+            return FT2232HServiceImpl.this;
+        }
+    }
 
-        this.readData_0 = new byte[readLength];
-        this.readDataToText_0 = new char[readLength];
-        this.readData_1 = new byte[readLength];
-        this.readDataToText_1 = new char[readLength];
+    @Override
+    public IBinder onBind(Intent intent) {
+        return binder;
+    }
 
-        this.chart = chart;
-        this.chart_1 = chart_1;
-        this.barChart = barChart;
-        this.barChart_1 =barChart_1;
+    private void requestUserPermission() {
+        Log.d(TAG, String.format("requestUserPermission(%X:%X)", usbDevice.getVendorId(), usbDevice.getProductId() ) );
+        PendingIntent mPendingIntent = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION), 0);
+        usbManager.requestPermission(usbDevice, mPendingIntent);
+    }
 
-        this.stopBit = 1;
-        this.dataBit = 8;
-        this.parity = 0;
-        this.flowControl = 0;
-        this.devCount = 0;
-
-        this.worker = Executors.newScheduledThreadPool(3);
-
+    @Override
+    public void onCreate() {
         try {
-            createDeviceList();
-            if(devCount > 0) {
-                connectFunctionPort1();
-                setConfig(baudRate, dataBit, stopBit, parity, flowControl, 0);
-                connectFunctionPort2();
-                setConfig(baudRate, dataBit, stopBit, parity, flowControl, 1);
-            }
+            findDevices();
 
-            worker.schedule(() -> {
-                try {
-                    configure();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }, 1, TimeUnit.SECONDS);
+            this.deviceFT2232HContext = this;
+            this.ftdid2xx = D2xxManager.getInstance(getApplicationContext());
+            this.nmeaParser = new NMEAParser();
+            this.ubxParser = new UBXParser();
 
+            this.readData_0 = new byte[readLength];
+            this.readData_1 = new byte[readLength];
 
-        } catch (Exception e) {
+            this.stopBit = 1;
+            this.dataBit = 8;
+            this.parity = 0;
+            this.flowControl = 0;
+            this.devCount = 0;
+
+            bReadThreadGoing_0 = false;
+            bReadThreadGoing_1 = false;
+            SERVICE_CONNECTED = true;
+            setFilter();
+            findDevices();
+
+        } catch (D2xxManager.D2xxException e) {
             e.printStackTrace();
         }
     }
+
+    @Override
+    public void setHandler(Handler mHandler) {
+        this.handler = mHandler;
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        return Service.START_NOT_STICKY;
+    }
+    private void findDevices() {
+        this.usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+        HashMap<String, UsbDevice> deviceList = usbManager.getDeviceList();
+        Iterator<UsbDevice> iterator = deviceList.values().iterator();
+
+        while (iterator.hasNext() && usbDevice == null) {
+            UsbDevice device = iterator.next();
+            if (is_FTDI_USB_to_Serial_Device(usbDevice)) {
+                usbDevice = device;
+                ftdid2xx.addUsbDevice(usbDevice);
+                ftdid2xx.setRequestPermission(false);
+                requestUserPermission();
+            }
+        }
+        if (usbDevice==null) {
+            // There are no USB devices connected (but usb host were listed). Send an intent to MainActivity.
+            Intent intent = new Intent(ACTION_NO_USB);
+            sendBroadcast(intent);
+        }
+    }
+
+    private void configureDevices() {
+        createDeviceList();
+        if(devCount > 0) {
+            connectFunctionPort1();
+            setConfig(baudRate, dataBit, stopBit, parity, flowControl, 0);
+            connectFunctionPort2();
+            setConfig(baudRate, dataBit, stopBit, parity, flowControl, 1);
+        }
+
+        worker.schedule(() -> {
+            try {
+                configure();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }, 1, TimeUnit.SECONDS);
+    }
+
+    private void setFilter() {
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(ACTION_USB_PERMISSION);
+        filter.addAction(ACTION_USB_DETACHED);
+        filter.addAction(ACTION_USB_ATTACHED);
+        registerReceiver(usbReceiver, filter);
+    }
+
+    private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context arg0, Intent arg1) {
+            if (arg1.getAction().equals(ACTION_USB_PERMISSION)) {
+                boolean granted = arg1.getExtras().getBoolean(UsbManager.EXTRA_PERMISSION_GRANTED);
+                if (granted) {  // User accepted our USB connection. Try to open the device as a serial port
+                    Intent intent = new Intent(ACTION_USB_PERMISSION_GRANTED);
+                    arg0.sendBroadcast(intent);
+                    configureDevices();
+                } else { // User not accepted our USB connection. Send an Intent to the Main Activity
+                    Intent intent = new Intent(ACTION_USB_PERMISSION_NOT_GRANTED);
+                    arg0.sendBroadcast(intent);
+                }
+            } else if (arg1.getAction().equals(ACTION_USB_ATTACHED)) {
+                if (!serialPortConnected)
+                    findDevices(); // A USB device has been attached. Try to open it as a Serial port
+            } else if (arg1.getAction().equals(ACTION_USB_DETACHED)) {
+                // Usb device was disconnected. send an intent to the Main Activity
+                Intent intent = new Intent(ACTION_USB_DISCONNECTED);
+                arg0.sendBroadcast(intent);
+                if (serialPortConnected) {
+                    stopService();
+                }
+                serialPortConnected = false;
+            }
+        }
+    };
 
     public void createDeviceList() {
         int tempDevCount = ftdid2xx.createDeviceInfoList(deviceFT2232HContext);
@@ -146,7 +249,6 @@ public class FT2232HServiceImpl implements FTService {
         }
         else {
             devCount = -1;
-            currentIndex = -1;
         }
     }
 
@@ -170,9 +272,16 @@ public class FT2232HServiceImpl implements FTService {
 
         worker.schedule(() -> {
             disableMessages();
-            setMeasureRate();
-            setMonSpanRate();
-            setRfRate();
+            worker.schedule(() -> {
+                setMeasureRate();
+                worker.schedule(() -> {
+                    setMonSpanRate();
+                    worker.schedule(() -> {
+                        setRfRate();
+                        serialPortConnected = true;
+                    }, 1, TimeUnit.SECONDS);
+                }, 1, TimeUnit.SECONDS);
+            }, 1, TimeUnit.SECONDS);
         }, 1, TimeUnit.SECONDS);
     }
 
@@ -182,7 +291,7 @@ public class FT2232HServiceImpl implements FTService {
             sendMessage(Commands.disableMessages, 1);
             sendMessage(Commands.disableGGAMessages, 0);
             sendMessage(Commands.disableGGAMessages, 1);
-            Log.d("MSG", "SEND DISABLE MESSAGES DONE");
+            Log.d(TAG, "SEND DISABLE MESSAGES DONE");
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -192,7 +301,7 @@ public class FT2232HServiceImpl implements FTService {
         try {
             sendMessage(Commands.monSpanRate, 0);
             sendMessage(Commands.monSpanRate, 1);
-            Log.d("MSG", "SEND MON RATE MESSAGES");
+            Log.d(TAG, "SEND MON RATE MESSAGES");
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -202,7 +311,7 @@ public class FT2232HServiceImpl implements FTService {
         try {
             sendMessage(Commands.rfRate, 0);
             sendMessage(Commands.rfRate, 1);
-            Log.d("MSG", "SEND RF MESSAGES DONE");
+            Log.d(TAG, "SEND RF MESSAGES DONE");
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -214,31 +323,6 @@ public class FT2232HServiceImpl implements FTService {
             sendMessage(Commands.measureRate50, 1);
         } catch (IOException e) {
             e.printStackTrace();
-        }
-    }
-
-    @Override
-    public void enableRead(int index){
-        iEnableReadFlag = (iEnableReadFlag + 1)%2;
-
-        FT_Device port = null;
-        if (index == 0) {
-            port = port_0;
-        } else if (index == 1) {
-            port = port_1;
-        }
-
-        if (port == null) {
-            Log.e("j2xx", "SendMessage: device not open");
-            return;
-        }
-
-        if(iEnableReadFlag == 1) {
-            port.purge((byte) (D2xxManager.FT_PURGE_TX));
-            port.restartInTask();
-        }
-        else {
-            port.stopInTask();
         }
     }
 
@@ -257,7 +341,7 @@ public class FT2232HServiceImpl implements FTService {
         }
 
         if (port == null || !port.isOpen()) {
-            Log.e("j2xx", "SendMessage: device not open");
+            Log.e(TAG, "SendMessage: device not open");
             return;
         }
 
@@ -267,70 +351,91 @@ public class FT2232HServiceImpl implements FTService {
 
     }
 
-    private final Handler handler =  new Handler(Looper.getMainLooper()) {
-        @Override
-        public void handleMessage(Message msg) {
-            Bundle bundle = msg.getData();
-            if (bundle.getString(TYPE) == null) {
-                return;
-            }
-            if (bundle.getString(TYPE).equals(MON_SPAN)) {
-                MonSpanMsg monSpanMsg = bundle.getParcelable(MON_SPAN);
-                if (monSpanMsg != null) {
-                    updateChart(monSpanMsg, msg.what);
-                }
-            } else if (bundle.getString(TYPE).equals(MON_RF)) {
-                RfMsg rfMsg = bundle.getParcelable(MON_RF);
-                if (rfMsg != null) {
-                    updateBarChart(rfMsg, msg.what);
+    private int handleMessage(int type, LinkedList<Byte> fifo, byte[] monSpan, byte[] monRf, byte[] readData, int iavailable, Pair<Integer, Integer> monFilled, int index) {
+        for (int i = 0; i< iavailable; i++) {
+            fifo.add(readData[i]);
+        }
+
+
+        Byte first = Byte.valueOf("00");
+        if (type == 0) {
+            while (!String.format("%04x", first).equals("00b5") && fifo.size() >= 4) {
+                first = fifo.pollFirst();
+                monSpan[0] = first;
+                monRf[0] = first;
+                Byte next = fifo.pollFirst();
+                monSpan[1] = next;
+                monRf[1] = next;
+                next = fifo.pollFirst();
+                monSpan[2] = next;
+                monRf[2] = next;
+                next = fifo.pollFirst();
+                monSpan[3] = next;
+                monRf[3] = next;
+                if ((String.format("%04x", first).equals("00b5")) &&
+                        (String.format("%04x", next).equals("0038"))) {
+                    monFilled.second = 4;
+                    type = 2;
+                } else if ((String.format("%04x", first).equals("00b5") &&
+                        (String.format("%04x", next).equals("0031")))) {
+                    monFilled.first = 4;
+                    type = 1;
                 }
             }
         }
-    };
 
-    private void updateChart(MonSpanMsg monSpanMsg, int index) {
-        LineChart tempChap = index == 1 ? chart : chart_1;
-        tempChap.setVisibleXRange(0, 256);
 
-        int[] spectrum = monSpanMsg.getSpectrum();
-        List<Entry> entryList = new ArrayList<>();
-        for (int i = 0; i < spectrum.length; i++) {
-
-            Entry entryForIndex = new Entry();
-            entryForIndex.setX(i);
-            entryForIndex.setY(spectrum[i]);
-            entryList.add(entryForIndex);
+        if (type == 1 && fifo.size() > 0) {
+            int min = Math.min(fifo.size(), MON_SPAN_SIZE);
+            int filledTemp =  monFilled.first ;
+            for (int i =  monFilled.first; i < min; i++) {
+                monSpan[i] = fifo.pollFirst();
+                filledTemp++;
+            }
+            monFilled.first = filledTemp;
+            if ( monFilled.first >= MON_SPAN_SIZE) {
+                type = 0;
+            }
         }
-        LineDataSet dataSet = new LineDataSet(entryList, "RF " + index);
-        dataSet.setMode(LineDataSet.Mode.CUBIC_BEZIER);
-        dataSet.setCubicIntensity(0.2f);
-        dataSet.setDrawFilled(true);
-        dataSet.setDrawCircles(false);
-        dataSet.setLineWidth(1.8f);
-        dataSet.setCircleRadius(4f);
-        dataSet.setCircleColor(Color.RED);
-        dataSet.setHighLightColor(Color.rgb(244, 117, 117));
-        dataSet.setColor(Color.RED);
-        dataSet.setFillColor(Color.RED);
-        dataSet.setFillAlpha(100);
-        dataSet.setDrawHorizontalHighlightIndicator(false);
-        dataSet.setFillFormatter((dataSet1, dataProvider) -> chart.getAxisLeft().getAxisMinimum());
-        dataSet.setColor(R.color.purple_200);
-        dataSet.setValueTextColor(R.color.purple_500);
-        LineData lineData = new LineData(dataSet);
-        tempChap.setData(lineData);
-        tempChap.invalidate();
+
+        if (type == 2 && fifo.size() > 0) {
+            int min = Math.min(fifo.size(), MON_RF_SIZE);
+            int filledTemp =  monFilled.second;
+            for (int i =  monFilled.second; i < min; i++) {
+                monRf[i] = fifo.pollFirst();
+                filledTemp++;
+            }
+            monFilled.second = filledTemp;
+            if (monFilled.second >= MON_RF_SIZE) {
+                type = 0;
+            }
+        }
+
+        Log.e("REST - " + index, "RESTING " + monFilled.first);
+        Log.e("REST - " + index, "RESTIN RF " +  monFilled.second);
+        Bundle bundle = new Bundle();
+        if (ubxParser.isMonSpan(monSpan) && monFilled.first == MON_SPAN_SIZE) {
+            Message msg = handler.obtainMessage(index);
+            MonSpanMsg spanMsg = ubxParser.getMonSpan(monSpan);
+            bundle.putParcelable(MON_SPAN, spanMsg);
+            bundle.putString(TYPE, MON_SPAN);
+            msg.setData(bundle);
+            handler.sendMessage(msg);
+            monFilled.first = 0;
+
+        }
+        if (ubxParser.isRf(monRf) &&  monFilled.second == MON_RF_SIZE) {
+            Message msg = handler.obtainMessage(index);
+            RfMsg rfMsg = ubxParser.getRf(monRf);
+            bundle.putParcelable(MON_RF, rfMsg);
+            bundle.putString(TYPE, MON_RF);
+            msg.setData(bundle);
+            handler.sendMessage(msg);
+            monFilled.second = 0;
+        }
+        return type;
     }
 
-    private void updateBarChart(RfMsg monRfMsg, int index) {
-        BarChart tempBarChart = index == 1 ? barChart : barChart_1;
-        BarData barData = tempBarChart.getBarData();
-        barData.removeEntry(1, 0);
-
-        barData.addEntry(new BarEntry(1, monRfMsg.getNoisePerMS()), 0);
-        tempBarChart.setData(barData);
-        tempBarChart.invalidate();
-    }
 
     private class ReadPort_0 implements Runnable {
         @Override
@@ -340,77 +445,30 @@ public class FT2232HServiceImpl implements FTService {
             int monSpanFilled = 0;
             byte[] monRf = new byte[MON_RF_SIZE];
             int monRfFilled = 0;
-            int lastFilled = 0; // 1 monSpan, 2 monRf.
-            int beforeFilled;
+            LinkedList<Byte> fifo = new LinkedList();
+            Pair<Integer, Integer> monFilled = new Pair<>(monSpanFilled, monRfFilled);
+            int type = 0;
             while(bReadThreadGoing_0) {
                 try {
                     try {
-                        Thread.sleep(50);
+                        Thread.sleep(200);
                     } catch (InterruptedException e) {
                     }
 
                     iavailable_0 = port_0.getQueueStatus();
-                    Log.e("AVAILABLE", "AVAILABLE " + iavailable_0);
                     if (iavailable_0 > 0) {
 
-                        if(iavailable_0 > readLength){
+                        if (iavailable_0 > readLength) {
                             iavailable_0 = readLength;
                         }
 
                         port_0.read(readData_0, iavailable_0);
-                        Log.e("RECEIVED", String.format("%02X ", readData_0[0]) + " " + String.format("%02X ", readData_0[1]) + " " + String.format("%02X ", readData_0[2]) + " " + String.format("%02X ", readData_0[3]));
-
-                        if (lastFilled == 0 || lastFilled == 1) {
-                            beforeFilled = monSpanFilled;
-                            monSpanFilled = findMonSpan(readData_0, iavailable_0, monSpan, monSpanFilled, lastFilled);
-                            if (beforeFilled > monSpanFilled) {
-                                lastFilled = 1;
-                            }
-                            beforeFilled = monRfFilled;
-                            monRfFilled = findMonRF(readData_0, iavailable_0, monRf, monRfFilled, lastFilled);
-                            if (beforeFilled > monRfFilled) {
-                                lastFilled = 2;
-                            }
-                        } else if (lastFilled == 2) {
-                            beforeFilled = monRfFilled;
-                            monRfFilled = findMonRF(readData_0, iavailable_0, monRf, monRfFilled, lastFilled);
-                            if (beforeFilled > monRfFilled) {
-                                lastFilled = 2;
-                            }
-                            beforeFilled = monSpanFilled;
-                            monSpanFilled = findMonSpan(readData_0, iavailable_0, monSpan, monSpanFilled, lastFilled);
-                            if (beforeFilled > monSpanFilled) {
-                                lastFilled = 1;
-                            }
-                        }
-
-                        Bundle bundle = new Bundle();
-                        if (ubxParser.isMonSpan(monSpan) && monSpanFilled == MON_SPAN_SIZE) {
-                            Message msg = handler.obtainMessage(1);
-                            MonSpanMsg spanMsg = ubxParser.getMonSpan(monSpan);
-                            bundle.putParcelable(MON_SPAN, spanMsg);
-                            bundle.putString(TYPE, MON_SPAN);
-                            msg.setData(bundle);
-                            handler.sendMessage(msg);
-                            monSpan = new byte[MON_SPAN_SIZE];
-                            monSpanFilled = 0;
-                            if (lastFilled == 1) {
-                                lastFilled = 0;
-                            }
-
-                        }
-                        if (ubxParser.isRf(monRf) && monRfFilled == MON_RF_SIZE) {
-                            Message msg = handler.obtainMessage(1);
-                            RfMsg rfMsg = ubxParser.getRf(monRf);
-                            bundle.putParcelable(MON_RF, rfMsg);
-                            bundle.putString(TYPE, MON_RF);
-                            msg.setData(bundle);
-                            handler.sendMessage(msg);
+                        type = handleMessage(type, fifo, monSpan, monRf, readData_0, iavailable_0, monFilled, 1);
+                        if (monFilled.second == 0) {
                             monRf = new byte[MON_RF_SIZE];
-                            monRfFilled = 0;
-                            if (lastFilled == 2) {
-                                lastFilled = 0;
-                            }
+                        }
+                        if (monFilled.first == 0) {
+                            monSpan = new byte[MON_SPAN_SIZE];
                         }
                     }
 
@@ -422,50 +480,6 @@ public class FT2232HServiceImpl implements FTService {
         }
     }
 
-    private int findMonSpan(byte[] readData, int iavailable, byte[] monSpan, int monSpanFilled, int lastFilled) {
-        if (monSpanFilled == 0) {
-            for (int i = 0; i < iavailable - 3; i++) {
-                if (String.format("%04x", readData[i]).equals("00b5") && String.format("%04x", readData[i+3]).equals("0031")) {
-                    int restInFrame = Math.min((iavailable - i), MON_SPAN_SIZE);
-                    for (int c = 0; c < restInFrame; c++) {
-                        monSpan[c] = readData[c + i];
-                        monSpanFilled++;
-                    }
-                    break;
-                }
-            }
-        } else if (lastFilled == 1) {
-            int restInFrame = Math.min((iavailable - monSpanFilled), MON_SPAN_SIZE);
-            for (int i = 0; i < restInFrame; i++) {
-                monSpan[i] = readData[i];
-                monSpanFilled++;
-            }
-        }
-        return monSpanFilled;
-    }
-
-    private int findMonRF(byte[] readData, int iavailable, byte[] monRf, int monRfFilled, int lastFilled) {
-        if (monRfFilled == 0) {
-            for (int i = 0; i < iavailable - 3; i++) {
-                if (String.format("%04x", readData[i]).equals("00b5") && String.format("%04x", readData[i+3]).equals("0038")) {
-                    int restInFrame = Math.min((iavailable - i), MON_RF_SIZE);
-                    for (int c = 0; c < restInFrame; c++) {
-                        monRf[c] = readData[c + i];
-                        monRfFilled++;
-                    }
-                    break;
-                }
-            }
-        } else if (lastFilled == 2) {
-            int restInFrame = Math.min((iavailable - monRfFilled), MON_RF_SIZE);
-            for (int i = 0; i < restInFrame; i++) {
-                monRf[i] = readData[i];
-                monRfFilled++;
-            }
-        }
-        return monRfFilled;
-
-    }
 
     private class ReadPort_1  implements Runnable {
         @Override
@@ -476,12 +490,13 @@ public class FT2232HServiceImpl implements FTService {
             int monSpanFilled = 0;
             byte[] monRf = new byte[MON_RF_SIZE];
             int monRfFilled = 0;
-            int lastFilled = 0; // 1 monSpan, 2 monRf.
-            int beforeFilled;
+            LinkedList<Byte> fifo = new LinkedList();
+            Pair<Integer, Integer> monFilled = new Pair<>(monSpanFilled, monRfFilled);
+            int type = 0;
             while(bReadThreadGoing_1) {
                 try {
                     try {
-                        Thread.sleep(50);
+                        Thread.sleep(200);
                     } catch (InterruptedException e) {
                     }
 
@@ -493,58 +508,12 @@ public class FT2232HServiceImpl implements FTService {
                         }
 
                         port_1.read(readData_1, iavailable_1);
-
-                        if (lastFilled == 0 || lastFilled == 1) {
-                            beforeFilled = monSpanFilled;
-                            monSpanFilled = findMonSpan(readData_1, iavailable_1, monSpan, monSpanFilled, lastFilled);
-                            if (beforeFilled > monSpanFilled) {
-                                lastFilled = 1;
-                            }
-                            beforeFilled = monRfFilled;
-                            monRfFilled = findMonRF(readData_1, iavailable_1, monRf, monRfFilled, lastFilled);
-                            if (beforeFilled > monRfFilled) {
-                                lastFilled = 2;
-                            }
-                        } else if (lastFilled == 2) {
-                            beforeFilled = monRfFilled;
-                            monRfFilled = findMonRF(readData_1, iavailable_1, monRf, monRfFilled, lastFilled);
-                            if (beforeFilled > monRfFilled) {
-                                lastFilled = 2;
-                            }
-                            beforeFilled = monSpanFilled;
-                            monSpanFilled = findMonSpan(readData_1, iavailable_1, monSpan, monSpanFilled, lastFilled);
-                            if (beforeFilled > monSpanFilled) {
-                                lastFilled = 1;
-                            }
-                        }
-
-                        Bundle bundle = new Bundle();
-                        if (ubxParser.isMonSpan(monSpan) && monSpanFilled == MON_SPAN_SIZE) {
-                            Message msg = handler.obtainMessage(2);
-                            MonSpanMsg spanMsg = ubxParser.getMonSpan(monSpan);
-                            bundle.putParcelable(MON_SPAN, spanMsg);
-                            bundle.putString(TYPE, MON_SPAN);
-                            msg.setData(bundle);
-                            handler.sendMessage(msg);
-                            monSpan = new byte[MON_SPAN_SIZE];
-                            monSpanFilled = 0;
-                            if (lastFilled == 1) {
-                                lastFilled = 0;
-                            }
-
-                        }
-                        if (ubxParser.isRf(monRf) && monRfFilled == MON_RF_SIZE) {
-                            Message msg = handler.obtainMessage(2);
-                            RfMsg rfMsg = ubxParser.getRf(monRf);
-                            bundle.putParcelable(MON_RF, rfMsg);
-                            bundle.putString(TYPE, MON_RF);
-                            msg.setData(bundle);
-                            handler.sendMessage(msg);
+                        type = handleMessage(type, fifo, monSpan, monRf, readData_1, iavailable_1, monFilled, 2);
+                        if (monFilled.second == 0) {
                             monRf = new byte[MON_RF_SIZE];
-                            monRfFilled = 0;
-                            if (lastFilled == 2) {
-                                lastFilled = 0;
-                            }
+                        }
+                        if (monFilled.first == 0) {
+                            monSpan = new byte[MON_SPAN_SIZE];
                         }
                     }
                     readData_1 = new byte[readLength];
@@ -603,7 +572,6 @@ public class FT2232HServiceImpl implements FTService {
         }
 
         if (port_1.isOpen()) {
-            currentIndex = openIndex;
             Toast.makeText(deviceFT2232HContext, "open device port(" + openIndex+1 + ") OK", Toast.LENGTH_SHORT).show();
 
             if(!bReadThreadGoing_1) {
@@ -696,43 +664,69 @@ public class FT2232HServiceImpl implements FTService {
         }
 
         // TODO : flow ctrl: XOFF/XOM
-        // TODO : flow ctrl: XOFF/XOM
         ftDev.setFlowControl(flowCtrlSetting, (byte) 0x0b, (byte) 0x0d);
 
         Toast.makeText(deviceFT2232HContext, "Config done " + index, Toast.LENGTH_SHORT).show();
     }
 
+    private static boolean is_FTDI_USB_to_Serial_Device(UsbDevice dev) {
+        //check VID,
+        if(dev.getVendorId() != FTDI_Constants.VID_FTDI) {
+            return false;
+        }
+        //check PID,
+        switch(dev.getProductId()) {
+            case FTDI_Constants.PID_FT232B_FT245B_FT232R_FT245R:
+            case FTDI_Constants.PID_FT232H:
+            case FTDI_Constants.PID_FT2232C_FT2232D_FT2232L_FT2232H:
+            case FTDI_Constants.PID_FT4232H:
+                return true;
+
+            default:
+                return false;
+        }
+        //check bcdDevice, I... don't think we need to go this far...
+    }
+
     @Override
-    public void destroy() {
+    public void onDestroy() {
+        super.onDestroy();
+        unregisterReceiver(usbReceiver);
+        SERVICE_CONNECTED = false;
+        ftdid2xx = null;
+        stopService();
+    }
+
+    private void stopService() {
         worker.shutdown();
         bReadThreadGoing_0 = false;
         bReadThreadGoing_1 = false;
+        serialPortConnected = false;
+        usbDevice = null;
 
         devCount = -1;
-        currentIndex = -1;
-        try {
-            Thread.sleep(50);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
 
         if(port_0 != null) {
-            synchronized(port_0) {
-                if(port_0.isOpen()) {
-                    port_0.close();
-                }
+            if(port_0.isOpen()) {
+                port_0.close();
             }
         }
         if(port_1 != null) {
-            synchronized(port_1) {
-                if(port_1.isOpen()) {
-                    port_1.close();
-                }
+            if(port_1.isOpen()) {
+                port_1.close();
             }
         }
     }
 
+    public class Pair<F, S> {
+        public F first;
+        public S second;
 
+        public Pair(F first, S second) {
+            this.first = first;
+            this.second = second;
+        }
+    }
 
 
 }

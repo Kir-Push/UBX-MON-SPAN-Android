@@ -1,10 +1,16 @@
 package com.ublox.gnss;
 
+import static com.ublox.gnss.services.FT2232HServiceImpl.MON_RF;
+import static com.ublox.gnss.services.FT2232HServiceImpl.MON_SPAN;
+import static com.ublox.gnss.services.FT2232HServiceImpl.TYPE;
+
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.hardware.usb.UsbDevice;
@@ -27,74 +33,195 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.ublox.gnss.databinding.ActivityMainBinding;
+import com.ublox.gnss.driver.FTDI_Constants;
+import com.ublox.gnss.messages.MonSpanMsg;
+import com.ublox.gnss.messages.RfMsg;
 import com.ublox.gnss.services.FT2232HServiceImpl;
 import com.ublox.gnss.services.FTService;
 
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
+import android.os.Message;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.widget.Toast;
 
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 
 public class MainActivity extends AppCompatActivity {
 
-    private FTService ftService;
-    private D2xxManager ftdid2xx;
-    private UsbDevice usbDevice;
+    private FTService usbService;
+    private Handler mHandler;
 
-    private UsbManager manager;
-    private final BroadcastReceiver attachReceiver = new BroadcastReceiver() {
-        public void onReceive(Context context, Intent intent) {
-            if(intent.getAction().equals(UsbManager.ACTION_USB_DEVICE_DETACHED)) {
-                stopFtService();
-            } else if (intent.getAction().equals(UsbManager.ACTION_USB_DEVICE_ATTACHED)) {
-                try {
-                    startFtService();
-                } catch (D2xxManager.D2xxException e) {
-                    e.printStackTrace();
+    private final ServiceConnection usbConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName arg0, IBinder arg1) {
+            usbService = ((FT2232HServiceImpl.UsbBinder) arg1).getService();
+            usbService.setHandler(mHandler);
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName arg0) {
+            usbService = null;
+        }
+    };
+
+    private static class MyHandler extends Handler {
+        private final WeakReference<MainActivity> mActivity;
+
+        public MyHandler(MainActivity activity) {
+            mActivity = new WeakReference<>(activity);
+        }
+
+        @Override
+        public void handleMessage(Message msg) {
+            try {
+                Bundle bundle = msg.getData();
+                if (bundle.getString(TYPE) == null) {
+                    return;
                 }
-            } else if (intent.getAction().equals("com.android.example.USB_PERMISSION")) {
-                boolean granted = intent.getExtras().getBoolean(UsbManager.EXTRA_PERMISSION_GRANTED);
-                if (granted) { // User accepted our USB connection. Try to open the device as a serial port
-                    try {
-                        startFtService();
-                    } catch (D2xxManager.D2xxException e) {
-                        e.printStackTrace();
+                if (bundle.getString(TYPE).equals(MON_SPAN)) {
+                    MonSpanMsg monSpanMsg = bundle.getParcelable(MON_SPAN);
+                    if (monSpanMsg != null) {
+                        mActivity.get().updateChart(monSpanMsg, msg.what);
                     }
-                } else {
-                    PendingIntent mPermissionIntent = PendingIntent.getBroadcast(context, 0, //Carefull check whether it's true approach.
-                            new Intent("com.android.example.USB_PERMISSION"), 0);
-                    manager.requestPermission(usbDevice, mPermissionIntent);
+                } else if (bundle.getString(TYPE).equals(MON_RF)) {
+                    RfMsg rfMsg = bundle.getParcelable(MON_RF);
+                    if (rfMsg != null) {
+                        mActivity.get().updateBarChart(rfMsg, msg.what);
+                    }
                 }
+            } finally {
+                super.handleMessage(msg);
+            }
+        }
+    }
+
+    private void setFilters() {
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(FT2232HServiceImpl.ACTION_USB_PERMISSION_GRANTED);
+        filter.addAction(FT2232HServiceImpl.ACTION_NO_USB);
+        filter.addAction(FT2232HServiceImpl.ACTION_USB_DISCONNECTED);
+        filter.addAction(FT2232HServiceImpl.ACTION_USB_PERMISSION_NOT_GRANTED);
+        registerReceiver(mUsbReceiver, filter);
+    }
+
+    private void startService(Class<?> service, ServiceConnection serviceConnection, Bundle extras) {
+        if (!FT2232HServiceImpl.SERVICE_CONNECTED) {
+            Intent startService = new Intent(this, service);
+            if (extras != null && !extras.isEmpty()) {
+                Set<String> keys = extras.keySet();
+                for (String key : keys) {
+                    String extra = extras.getString(key);
+                    startService.putExtra(key, extra);
+                }
+            }
+            startService(startService);
+        }
+        Intent bindingIntent = new Intent(this, service);
+        bindService(bindingIntent, serviceConnection, Context.BIND_AUTO_CREATE);
+    }
+
+    /*
+     * Notifications from UsbService will be received here.
+     */
+    private final BroadcastReceiver mUsbReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            switch (intent.getAction()) {
+                case FT2232HServiceImpl.ACTION_USB_PERMISSION_GRANTED: // USB PERMISSION GRANTED
+                    Toast.makeText(context, "USB Ready", Toast.LENGTH_SHORT).show();
+                    break;
+                case FT2232HServiceImpl.ACTION_USB_PERMISSION_NOT_GRANTED: // USB PERMISSION NOT GRANTED
+                    Toast.makeText(context, "USB Permission not granted", Toast.LENGTH_SHORT).show();
+                    break;
+                case FT2232HServiceImpl.ACTION_NO_USB: // NO USB CONNECTED
+                    Toast.makeText(context, "No USB connected", Toast.LENGTH_SHORT).show();
+                    break;
+                case FT2232HServiceImpl.ACTION_USB_DISCONNECTED: // USB DISCONNECTED
+                    Toast.makeText(context, "USB disconnected", Toast.LENGTH_SHORT).show();
+                    break;
             }
         }
     };
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        setFilters();  // Start listening notifications from UsbService
+        startService(FT2232HServiceImpl.class, usbConnection, null); // Start UsbService(if it was not started before) and Bind it
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        unregisterReceiver(mUsbReceiver);
+        unbindService(usbConnection);
+    }
+
+
+    public void updateChart(MonSpanMsg monSpanMsg, int index) {
+        Toast.makeText(this, " index - " + index, Toast.LENGTH_SHORT).show();
+        LineChart tempChart = index == 1 ? findViewById(R.id.chart) :  findViewById(R.id.chart_2);
+        tempChart.setVisibleXRange(0, 256);
+
+        int[] spectrum = monSpanMsg.getSpectrum();
+        List<Entry> entryList = new ArrayList<>();
+        for (int i = 0; i < spectrum.length; i++) {
+
+            Entry entryForIndex = new Entry();
+            entryForIndex.setX(i);
+            entryForIndex.setY(spectrum[i]);
+            entryList.add(entryForIndex);
+        }
+        LineDataSet dataSet = new LineDataSet(entryList, "RF " + index);
+        dataSet.setMode(LineDataSet.Mode.CUBIC_BEZIER);
+        dataSet.setCubicIntensity(0.2f);
+        dataSet.setDrawFilled(true);
+        dataSet.setDrawCircles(false);
+        dataSet.setLineWidth(1.8f);
+        dataSet.setCircleRadius(4f);
+        dataSet.setCircleColor(Color.RED);
+        dataSet.setHighLightColor(Color.rgb(244, 117, 117));
+        dataSet.setColor(Color.RED);
+        dataSet.setFillColor(Color.RED);
+        dataSet.setFillAlpha(100);
+        dataSet.setDrawHorizontalHighlightIndicator(false);
+        dataSet.setFillFormatter((dataSet1, dataProvider) -> tempChart.getAxisLeft().getAxisMinimum());
+        dataSet.setColor(R.color.purple_200);
+        dataSet.setValueTextColor(R.color.purple_500);
+        LineData lineData = new LineData(dataSet);
+        tempChart.setData(lineData);
+        tempChart.invalidate();
+    }
+
+    public void updateBarChart(RfMsg monRfMsg, int index) {
+        BarChart tempBarChart = index == 1 ? findViewById(R.id.index) :  findViewById(R.id.index_2);
+        BarData barData = tempBarChart.getBarData();
+        barData.removeEntry(1, 0);
+
+        barData.addEntry(new BarEntry(1, monRfMsg.getNoisePerMS()), 0);
+        tempBarChart.setData(barData);
+        tempBarChart.invalidate();
+    }
+
 
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-
-        IntentFilter filter = new IntentFilter();
-        filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
-        filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
-        filter.addAction("com.android.example.USB_PERMISSION");
-        registerReceiver(attachReceiver, filter);
-
         com.ublox.gnss.databinding.ActivityMainBinding binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
-
+        mHandler = new MyHandler(this);
         setupCharts();
-
-        try {
-            startFtService();
-        } catch (D2xxManager.D2xxException e) {
-            e.printStackTrace();
-        }
 
     }
 
@@ -224,46 +351,6 @@ public class MainActivity extends AppCompatActivity {
         barChart1.getAxisLeft().setDrawGridLines(false);
         barChart1.getAxisLeft().disableGridDashedLine();
         barChart1.invalidate();
-    }
-
-    private void startFtService() throws D2xxManager.D2xxException {
-        manager = (UsbManager) getSystemService(Context.USB_SERVICE);
-        if (ftdid2xx == null && manager.getDeviceList().size() > 0) {
-            ftdid2xx = D2xxManager.getInstance(getApplicationContext());
-            Iterator<UsbDevice> iterator = manager.getDeviceList().values().iterator();
-            while (iterator.hasNext() && usbDevice == null) {
-                usbDevice = iterator.next();
-            }
-            // Open a connection to the first available driver.
-            UsbDeviceConnection connection = manager.openDevice(usbDevice);
-            if (connection == null || !manager.hasPermission(usbDevice)) {
-                PendingIntent mPermissionIntent = PendingIntent.getBroadcast(this, 0,
-                        new Intent("com.android.example.USB_PERMISSION"), 0);
-                manager.requestPermission(usbDevice, mPermissionIntent);
-                return;
-            }
-            ftdid2xx.addUsbDevice(usbDevice);
-        }
-
-        if (ftService == null && usbDevice != null && manager.hasPermission(usbDevice)) {
-            ftService = new FT2232HServiceImpl(getApplicationContext(), ftdid2xx,
-                    findViewById(R.id.chart), findViewById(R.id.chart_2),
-                    findViewById(R.id.index), findViewById(R.id.index_2));
-        }
-    }
-
-    private void stopFtService() {
-        try {
-            if (ftService != null) {
-                ftService.destroy();
-            }
-            ftService = null;
-            manager = null;
-            usbDevice = null;
-            ftdid2xx = null;
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
     }
 
     @Override
