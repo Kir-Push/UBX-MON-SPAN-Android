@@ -55,5 +55,10 @@ public class UBXParser {
 
     private int getInt(byte[] bytes) {
         return ((bytes[0] & 0xff) << 8) | (bytes[1] & 0xff);
+//        int value = 0;
+//        for (byte b : bytes) {
+//            value = (value << 8) + (b & 0xFF);
+//        }
+//        return value;
     }
 }
