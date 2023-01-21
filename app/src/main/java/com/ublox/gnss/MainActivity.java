@@ -21,6 +21,7 @@ import android.os.Bundle;
 import com.ftdi.j2xx.D2xxManager;
 import com.github.mikephil.charting.charts.BarChart;
 import com.github.mikephil.charting.charts.LineChart;
+import com.github.mikephil.charting.components.AxisBase;
 import com.github.mikephil.charting.components.Description;
 import com.github.mikephil.charting.data.BarData;
 import com.github.mikephil.charting.data.BarDataSet;
@@ -32,6 +33,8 @@ import com.github.mikephil.charting.data.LineDataSet;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.github.mikephil.charting.formatter.IAxisValueFormatter;
+import com.github.mikephil.charting.formatter.ValueFormatter;
 import com.ublox.gnss.databinding.ActivityMainBinding;
 import com.ublox.gnss.driver.FTDI_Constants;
 import com.ublox.gnss.messages.MonSpanMsg;
@@ -50,6 +53,7 @@ import android.widget.Toast;
 
 import java.io.IOException;
 import java.lang.ref.WeakReference;
+import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -163,6 +167,15 @@ public class MainActivity extends AppCompatActivity {
         unbindService(usbConnection);
     }
 
+    private float scaleCbr(double cbr) {
+        return (float)(Math.log(cbr)) * 10;
+    }
+
+    private float unScaleCbr(double cbr) {
+        double calcVal = Math.pow(2, cbr) * 10;
+        return (float)(calcVal);
+    }
+
 
     public void updateChart(MonSpanMsg monSpanMsg, int index) {
         LineChart tempChart = index == 1 ? findViewById(R.id.chart) :  findViewById(R.id.chart_2);
@@ -174,7 +187,7 @@ public class MainActivity extends AppCompatActivity {
 
             Entry entryForIndex = new Entry();
             entryForIndex.setX(i);
-            entryForIndex.setY(spectrum[i]);
+            entryForIndex.setY(scaleCbr(spectrum[i]));
             entryList.add(entryForIndex);
         }
         LineDataSet dataSet = new LineDataSet(entryList, "RF " + index);
@@ -201,9 +214,9 @@ public class MainActivity extends AppCompatActivity {
     public void updateBarChart(RfMsg monRfMsg, int index) {
         BarChart tempBarChart = index == 1 ? findViewById(R.id.index) :  findViewById(R.id.index_2);
         BarData barData = tempBarChart.getBarData();
-        barData.removeEntry(1, 0);
+        barData.removeEntry(0, 0);
 
-        barData.addEntry(new BarEntry(1, monRfMsg.getNoisePerMS()), 0);
+        barData.addEntry(new BarEntry(0,scaleCbr(monRfMsg.getNoisePerMS())), 0);
         tempBarChart.setData(barData);
         tempBarChart.invalidate();
     }
@@ -259,6 +272,17 @@ public class MainActivity extends AppCompatActivity {
         chart.getAxisLeft().disableGridDashedLine();
         chart.getXAxis().setDrawAxisLine(true);
         chart.setData(lineData);
+        chart.getAxisLeft().setValueFormatter(new ValueFormatter() {
+            @Override
+            public String getFormattedValue(float value, AxisBase axis) {
+                DecimalFormat mFormat;
+                mFormat = new DecimalFormat("##.###");
+                return mFormat.format(unScaleCbr(value));
+            }
+        });
+        chart.getAxisLeft().setAxisMinimum(0);
+        chart.getAxisLeft().setAxisMaximum(100);
+        chart.getAxisLeft().setLabelCount(5, true);
         chart.invalidate(); // refresh
 
         LineChart chart1 = findViewById(R.id.chart_2);
@@ -299,7 +323,19 @@ public class MainActivity extends AppCompatActivity {
         chart1.getAxisLeft().disableGridDashedLine();
         chart1.getXAxis().setDrawAxisLine(true);
         chart1.setData(lineData1);
+        chart1.getAxisLeft().setValueFormatter(new ValueFormatter() {
+            @Override
+            public String getFormattedValue(float value, AxisBase axis) {
+                DecimalFormat mFormat;
+                mFormat = new DecimalFormat("##.###");
+                return mFormat.format(unScaleCbr(value));
+            }
+        });
+        chart1.getAxisLeft().setAxisMinimum(0);
+        chart1.getAxisLeft().setAxisMaximum(100);
+        chart1.getAxisLeft().setLabelCount(5, true);
         chart1.invalidate(); // refresh
+
 
         BarChart barChart = findViewById(R.id.index);
         BarDataSet barDataSet = new BarDataSet(new ArrayList<>(), "NoisePerMS RF 1");
@@ -307,7 +343,7 @@ public class MainActivity extends AppCompatActivity {
         barDataSet.setValueTextColor(R.color.teal_700);
 
         BarData barData = new BarData(barDataSet);
-        barData.addEntry(new BarEntry(1, 0), 0);
+        barData.addEntry(new BarEntry(0, 0), 0);
         barChart.setData(barData);
         description = new Description();
         description.setText("");
@@ -323,6 +359,16 @@ public class MainActivity extends AppCompatActivity {
         barChart.getAxisLeft().setDrawGridLinesBehindData(false);
         barChart.getAxisLeft().setDrawGridLines(false);
         barChart.getAxisLeft().disableGridDashedLine();
+        barChart.getAxisLeft().setValueFormatter(new ValueFormatter() {
+            @Override
+            public String getFormattedValue(float value, AxisBase axis) {
+                DecimalFormat mFormat;
+                mFormat = new DecimalFormat("##.###");
+                return mFormat.format(unScaleCbr(value));
+            }
+        });
+        barChart.getAxisLeft().setAxisMinimum(0);
+        barChart.getAxisLeft().setAxisMaximum(100);
         barChart.invalidate();
 
         BarChart barChart1 = findViewById(R.id.index_2);
@@ -331,7 +377,7 @@ public class MainActivity extends AppCompatActivity {
         barDataSet.setValueTextColor(R.color.teal_700);
 
         BarData barData1 = new BarData(barDataSet1);
-        barData1.addEntry(new BarEntry(1, 0), 0);
+        barData1.addEntry(new BarEntry(0, 0), 0);
         barChart1.setData(barData1);
         description = new Description();
         description.setText("");
@@ -347,6 +393,16 @@ public class MainActivity extends AppCompatActivity {
         barChart1.getAxisLeft().setDrawGridLinesBehindData(false);
         barChart1.getAxisLeft().setDrawGridLines(false);
         barChart1.getAxisLeft().disableGridDashedLine();
+        barChart1.getAxisLeft().setValueFormatter(new ValueFormatter() {
+            @Override
+            public String getFormattedValue(float value, AxisBase axis) {
+                DecimalFormat mFormat;
+                mFormat = new DecimalFormat("##.###");
+                return mFormat.format(unScaleCbr(value));
+            }
+        });
+        barChart1.getAxisLeft().setAxisMinimum(0);
+        barChart1.getAxisLeft().setAxisMaximum(100);
         barChart1.invalidate();
     }
 
