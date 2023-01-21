@@ -2,6 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+<!--    <uses-feature android:name="android.hardware.usb.host"-->
+<!--        android:required="true"/>-->
+<!--    <uses-feature android:name="android.hardware.usb.host" />-->
+<!--    <uses-permission android:name="android.permission.USB_PERMISSION" />-->
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -27,6 +32,10 @@
                 android:name="android.app.lib_name"
                 android:value="" />
         </activity>
+        <service
+            android:name="com.ublox.gnss.services.FT2232HServiceImpl"
+            android:enabled="true">
+        </service>
     </application>
 
 </manifest>

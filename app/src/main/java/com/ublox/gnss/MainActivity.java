@@ -43,6 +43,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
+import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.widget.Toast;
@@ -105,7 +106,6 @@ public class MainActivity extends AppCompatActivity {
 
     private void setFilters() {
         IntentFilter filter = new IntentFilter();
-        filter.addAction(FT2232HServiceImpl.ACTION_USB_PERMISSION_GRANTED);
         filter.addAction(FT2232HServiceImpl.ACTION_NO_USB);
         filter.addAction(FT2232HServiceImpl.ACTION_USB_DISCONNECTED);
         filter.addAction(FT2232HServiceImpl.ACTION_USB_PERMISSION_NOT_GRANTED);
@@ -134,10 +134,8 @@ public class MainActivity extends AppCompatActivity {
     private final BroadcastReceiver mUsbReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
+            Log.e("USB_RECEIVE - !!!!", "ACTION!! " + intent.getAction());
             switch (intent.getAction()) {
-                case FT2232HServiceImpl.ACTION_USB_PERMISSION_GRANTED: // USB PERMISSION GRANTED
-                    Toast.makeText(context, "USB Ready", Toast.LENGTH_SHORT).show();
-                    break;
                 case FT2232HServiceImpl.ACTION_USB_PERMISSION_NOT_GRANTED: // USB PERMISSION NOT GRANTED
                     Toast.makeText(context, "USB Permission not granted", Toast.LENGTH_SHORT).show();
                     break;
@@ -167,7 +165,6 @@ public class MainActivity extends AppCompatActivity {
 
 
     public void updateChart(MonSpanMsg monSpanMsg, int index) {
-        Toast.makeText(this, " index - " + index, Toast.LENGTH_SHORT).show();
         LineChart tempChart = index == 1 ? findViewById(R.id.chart) :  findViewById(R.id.chart_2);
         tempChart.setVisibleXRange(0, 256);
 

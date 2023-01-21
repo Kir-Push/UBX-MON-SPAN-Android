@@ -35,15 +35,15 @@ public class FirstFragment extends Fragment {
         binding.buttonFirst.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                try {
-                    int devCount = D2xxManager.getInstance(view.getContext().getApplicationContext()).createDeviceInfoList(view.getContext().getApplicationContext());
-                    D2xxManager.FtDeviceInfoListNode[] deviceList = new D2xxManager.FtDeviceInfoListNode[devCount];
-                    int deviceInfoList = D2xxManager.getInstance(view.getContext().getApplicationContext()).getDeviceInfoList(devCount, deviceList);
-                    Snackbar.make(view, "Replace with your own action + = " + deviceInfoList + " " + devCount, Snackbar.LENGTH_LONG)
-                            .setAction("Action", null).show();
-                } catch (D2xxManager.D2xxException e) {
-                    e.printStackTrace();
-                }
+//                try {
+//                    int devCount = D2xxManager.getInstance(view.getContext().getApplicationContext()).createDeviceInfoList(view.getContext().getApplicationContext());
+//                    D2xxManager.FtDeviceInfoListNode[] deviceList = new D2xxManager.FtDeviceInfoListNode[devCount];
+//                    int deviceInfoList = D2xxManager.getInstance(view.getContext().getApplicationContext()).getDeviceInfoList(devCount, deviceList);
+//                    Snackbar.make(view, "Replace with your own action + = " + deviceInfoList + " " + devCount, Snackbar.LENGTH_LONG)
+//                            .setAction("Action", null).show();
+//                } catch (D2xxManager.D2xxException e) {
+//                    e.printStackTrace();
+//                }
                 NavHostFragment.findNavController(FirstFragment.this)
                         .navigate(R.id.action_FirstFragment_to_SecondFragment);
             }

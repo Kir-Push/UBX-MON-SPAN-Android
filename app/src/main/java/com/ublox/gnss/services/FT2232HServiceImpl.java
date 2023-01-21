@@ -6,7 +6,6 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.graphics.Color;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.os.Binder;
@@ -16,19 +15,10 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
-import android.util.Pair;
 import android.widget.Toast;
 
 import com.ftdi.j2xx.D2xxManager;
 import com.ftdi.j2xx.FT_Device;
-import com.github.mikephil.charting.charts.BarChart;
-import com.github.mikephil.charting.charts.LineChart;
-import com.github.mikephil.charting.data.BarData;
-import com.github.mikephil.charting.data.BarEntry;
-import com.github.mikephil.charting.data.Entry;
-import com.github.mikephil.charting.data.LineData;
-import com.github.mikephil.charting.data.LineDataSet;
-import com.ublox.gnss.R;
 import com.ublox.gnss.driver.FTDI_Constants;
 import com.ublox.gnss.messages.MonSpanMsg;
 import com.ublox.gnss.messages.RfMsg;
@@ -37,11 +27,9 @@ import com.ublox.gnss.parsers.UBXParser;
 import com.ublox.gnss.utils.UnsignedOperation;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
-import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -50,10 +38,11 @@ public class FT2232HServiceImpl extends Service implements FTService {
 
     public static final String TAG = "UsbService";
 
-    private static final String ACTION_USB_PERMISSION = "com.android.example.USB_PERMISSION";
+    public static final String ACTION_USB_PERMISSION = "com.android.example.USB_PERMISSION_TEXT";
     public static final String ACTION_USB_ATTACHED = "android.hardware.usb.action.USB_DEVICE_ATTACHED";
     public static final String ACTION_USB_DETACHED = "android.hardware.usb.action.USB_DEVICE_DETACHED";
     public static final String ACTION_USB_PERMISSION_GRANTED = "com.gnss.usbservice.USB_PERMISSION_GRANTED";
+    public static final String ACTION_USB_PERMISSION_REQUEST = "com.gnss.usbservice.USB_PERMISSION_REQUEST";
     public static final String ACTION_USB_PERMISSION_NOT_GRANTED = "com.gnss.usbservice.USB_PERMISSION_NOT_GRANTED";
     public static final String ACTION_USB_DISCONNECTED = "com.gnss.usbservice.USB_DISCONNECTED";
     public static final String ACTION_NO_USB = "com.gnss.usbservice.NO_USB";
@@ -65,6 +54,7 @@ public class FT2232HServiceImpl extends Service implements FTService {
     public static boolean SERVICE_CONNECTED = false;
 
     private Context deviceFT2232HContext;
+    private Context activityContext;
 
     /*local variables*/
     private int baudRate = 9600; /*baud rate*/
@@ -74,12 +64,24 @@ public class FT2232HServiceImpl extends Service implements FTService {
     private NMEAParser nmeaParser;
     private UBXParser ubxParser;
     private D2xxManager ftdid2xx;
+
+    @Override
+    public UsbManager getUsbManager() {
+        return usbManager;
+    }
+
     private UsbManager usbManager;
+
+    @Override
+    public UsbDevice getUsbDevice() {
+        return usbDevice;
+    }
+
     private UsbDevice usbDevice;
     private Handler handler;
 
     private int devCount = -1;
-    private static boolean serialPortConnected = true;
+    private static boolean serialPortConnected = false;
 
     private static int iEnableReadFlag = 1;
     private byte stopBit; /*1:1stop bits, 2:2 stop bits*/
@@ -103,7 +105,7 @@ public class FT2232HServiceImpl extends Service implements FTService {
     private static final int MON_SPAN_SIZE = 284;
     private static final int MON_RF_SIZE = 36;
 
-    private static final ScheduledExecutorService worker = Executors.newScheduledThreadPool(3);;
+    private static ScheduledExecutorService worker;
 
     private IBinder binder = new UsbBinder();
 
@@ -120,17 +122,23 @@ public class FT2232HServiceImpl extends Service implements FTService {
 
     private void requestUserPermission() {
         Log.d(TAG, String.format("requestUserPermission(%X:%X)", usbDevice.getVendorId(), usbDevice.getProductId() ) );
-        PendingIntent mPendingIntent = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION), 0);
+        PendingIntent mPendingIntent = PendingIntent.getBroadcast(getApplicationContext(), 0, new Intent(ACTION_USB_PERMISSION), 0);
         usbManager.requestPermission(usbDevice, mPendingIntent);
+    }
+
+    @Override
+    public void setActivityContext(Context context) {
+        this.activityContext = context;
     }
 
     @Override
     public void onCreate() {
         try {
+            worker = Executors.newScheduledThreadPool(3);
+            setFilter();
             findDevices();
-
             this.deviceFT2232HContext = this;
-            this.ftdid2xx = D2xxManager.getInstance(getApplicationContext());
+
             this.nmeaParser = new NMEAParser();
             this.ubxParser = new UBXParser();
 
@@ -146,10 +154,9 @@ public class FT2232HServiceImpl extends Service implements FTService {
             bReadThreadGoing_0 = false;
             bReadThreadGoing_1 = false;
             SERVICE_CONNECTED = true;
-            setFilter();
-            findDevices();
+          //  findDevices();
 
-        } catch (D2xxManager.D2xxException e) {
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }
@@ -167,14 +174,13 @@ public class FT2232HServiceImpl extends Service implements FTService {
         this.usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         HashMap<String, UsbDevice> deviceList = usbManager.getDeviceList();
         Iterator<UsbDevice> iterator = deviceList.values().iterator();
-
         while (iterator.hasNext() && usbDevice == null) {
             UsbDevice device = iterator.next();
-            if (is_FTDI_USB_to_Serial_Device(usbDevice)) {
+            if (device != null && is_FTDI_USB_to_Serial_Device(device)) {
                 usbDevice = device;
-                ftdid2xx.addUsbDevice(usbDevice);
-                ftdid2xx.setRequestPermission(false);
-                requestUserPermission();
+                new Handler(this.getMainLooper())
+                        .post(this::requestUserPermission);
+                break;
             }
         }
         if (usbDevice==null) {
@@ -182,50 +188,67 @@ public class FT2232HServiceImpl extends Service implements FTService {
             Intent intent = new Intent(ACTION_NO_USB);
             sendBroadcast(intent);
         }
+
     }
 
     private void configureDevices() {
-        createDeviceList();
-        if(devCount > 0) {
-            connectFunctionPort1();
-            setConfig(baudRate, dataBit, stopBit, parity, flowControl, 0);
-            connectFunctionPort2();
-            setConfig(baudRate, dataBit, stopBit, parity, flowControl, 1);
-        }
-
-        worker.schedule(() -> {
-            try {
-                configure();
-            } catch (IOException e) {
-                e.printStackTrace();
+        try {
+            if (this.ftdid2xx == null) {
+                this.ftdid2xx = D2xxManager.getInstance(getApplicationContext());
+                this.ftdid2xx.setUsbRegisterBroadcast(false);
+                this.ftdid2xx.setRequestPermission(false);
             }
-        }, 1, TimeUnit.SECONDS);
+            if (this.worker == null || this.worker.isShutdown() || this.worker.isTerminated()) {
+                this.worker = Executors.newScheduledThreadPool(3);
+            }
+            if (devCount > 0) {
+                return;
+            }
+            createDeviceList();
+            if (devCount > 0) {
+                connectFunctionPort1();
+                setConfig(baudRate, dataBit, stopBit, parity, flowControl, 0);
+                connectFunctionPort2();
+                setConfig(baudRate, dataBit, stopBit, parity, flowControl, 1);
+            }
+
+            worker.schedule(() -> {
+                try {
+                    configure();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }, 1, TimeUnit.SECONDS);
+        } catch (D2xxManager.D2xxException e) {
+            e.printStackTrace();
+        }
     }
 
     private void setFilter() {
         IntentFilter filter = new IntentFilter();
-        filter.addAction(ACTION_USB_PERMISSION);
+        filter.addAction(ACTION_USB_PERMISSION_GRANTED);
         filter.addAction(ACTION_USB_DETACHED);
         filter.addAction(ACTION_USB_ATTACHED);
+        filter.addAction(ACTION_USB_PERMISSION);
         registerReceiver(usbReceiver, filter);
     }
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context arg0, Intent arg1) {
+            Log.e("USB_RECEIVE", "ACTION!! " + arg1.getAction());
             if (arg1.getAction().equals(ACTION_USB_PERMISSION)) {
                 boolean granted = arg1.getExtras().getBoolean(UsbManager.EXTRA_PERMISSION_GRANTED);
                 if (granted) {  // User accepted our USB connection. Try to open the device as a serial port
-                    Intent intent = new Intent(ACTION_USB_PERMISSION_GRANTED);
-                    arg0.sendBroadcast(intent);
+                    Intent arg = new Intent(FT2232HServiceImpl.ACTION_USB_PERMISSION_GRANTED);
+                    arg0.sendBroadcast(arg);
+                  //  ftdid2xx.addUsbDevice(usbDevice);
                     configureDevices();
-                } else { // User not accepted our USB connection. Send an Intent to the Main Activity
-                    Intent intent = new Intent(ACTION_USB_PERMISSION_NOT_GRANTED);
-                    arg0.sendBroadcast(intent);
                 }
             } else if (arg1.getAction().equals(ACTION_USB_ATTACHED)) {
-                if (!serialPortConnected)
-                    findDevices(); // A USB device has been attached. Try to open it as a Serial port
+                if (!serialPortConnected) {
+                    findDevices();
+                }
             } else if (arg1.getAction().equals(ACTION_USB_DETACHED)) {
                 // Usb device was disconnected. send an intent to the Main Activity
                 Intent intent = new Intent(ACTION_USB_DISCONNECTED);
@@ -272,16 +295,10 @@ public class FT2232HServiceImpl extends Service implements FTService {
 
         worker.schedule(() -> {
             disableMessages();
-            worker.schedule(() -> {
-                setMeasureRate();
-                worker.schedule(() -> {
-                    setMonSpanRate();
-                    worker.schedule(() -> {
-                        setRfRate();
-                        serialPortConnected = true;
-                    }, 1, TimeUnit.SECONDS);
-                }, 1, TimeUnit.SECONDS);
-            }, 1, TimeUnit.SECONDS);
+            setMeasureRate();
+            setMonSpanRate();
+            setRfRate();
+            serialPortConnected = true;
         }, 1, TimeUnit.SECONDS);
     }
 
@@ -352,6 +369,7 @@ public class FT2232HServiceImpl extends Service implements FTService {
     }
 
     private int handleMessage(int type, LinkedList<Byte> fifo, byte[] monSpan, byte[] monRf, byte[] readData, int iavailable, Pair<Integer, Integer> monFilled, int index) {
+        Log.e("RECEIVED - " + index, String.format("%02X ", readData[0]) + " " + String.format("%02X ", readData[1]) + " " + String.format("%02X ", readData[2]) + " " + String.format("%02X ", readData[3]));
         for (int i = 0; i< iavailable; i++) {
             fifo.add(readData[i]);
         }
@@ -359,27 +377,32 @@ public class FT2232HServiceImpl extends Service implements FTService {
 
         Byte first = Byte.valueOf("00");
         if (type == 0) {
-            while (!String.format("%04x", first).equals("00b5") && fifo.size() >= 4) {
+            while (fifo.size() >= 4) {
                 first = fifo.pollFirst();
                 monSpan[0] = first;
                 monRf[0] = first;
-                Byte next = fifo.pollFirst();
-                monSpan[1] = next;
-                monRf[1] = next;
-                next = fifo.pollFirst();
-                monSpan[2] = next;
-                monRf[2] = next;
-                next = fifo.pollFirst();
-                monSpan[3] = next;
-                monRf[3] = next;
-                if ((String.format("%04x", first).equals("00b5")) &&
-                        (String.format("%04x", next).equals("0038"))) {
-                    monFilled.second = 4;
-                    type = 2;
-                } else if ((String.format("%04x", first).equals("00b5") &&
-                        (String.format("%04x", next).equals("0031")))) {
-                    monFilled.first = 4;
-                    type = 1;
+                if (String.format("%04x", first).equals("00b5")) {
+                    Byte next = fifo.pollFirst();
+                    monSpan[1] = next;
+                    monRf[1] = next;
+                    next = fifo.pollFirst();
+                    monSpan[2] = next;
+                    monRf[2] = next;
+                    next = fifo.pollFirst();
+                    monSpan[3] = next;
+                    monRf[3] = next;
+                    Log.e("RECEIVED! - " + index, String.format("%04x", first) + " " + String.format("%04x", next) + "   FIFO SIZE - " + fifo.size());
+                    if ((String.format("%04x", first).equals("00b5")) &&
+                            (String.format("%04x", next).equals("0038"))) {
+                        monFilled.second = 4;
+                        type = 2;
+                        break;
+                    } else if ((String.format("%04x", first).equals("00b5") &&
+                            (String.format("%04x", next).equals("0031")))) {
+                        monFilled.first = 4;
+                        type = 1;
+                        break;
+                    }
                 }
             }
         }
@@ -528,13 +551,7 @@ public class FT2232HServiceImpl extends Service implements FTService {
 
     public void connectFunctionPort1() {
         int openIndex = 0;
-        if(null == port_0) {
-            port_0 = ftdid2xx.openByIndex(deviceFT2232HContext, openIndex);
-        } else {
-            synchronized(port_0) {
-                port_0 = ftdid2xx.openByIndex(deviceFT2232HContext, openIndex);
-            }
-        }
+        port_0 = ftdid2xx.openByIndex(deviceFT2232HContext, openIndex);
 
         if(port_0 == null) {
             Toast.makeText(deviceFT2232HContext,"open device port("+openIndex+1+") NG, port_0 == null", Toast.LENGTH_LONG).show();
@@ -557,14 +574,7 @@ public class FT2232HServiceImpl extends Service implements FTService {
     public void connectFunctionPort2() {
         int openIndex = 1;
 
-        if(null == port_1) {
-            port_1 = ftdid2xx.openByIndex(deviceFT2232HContext, openIndex);
-        }
-        else {
-            synchronized(port_1) {
-                port_1 = ftdid2xx.openByIndex(deviceFT2232HContext, openIndex);
-            }
-        }
+        port_1 = ftdid2xx.openByIndex(deviceFT2232HContext, openIndex);
 
         if(port_1 == null) {
             Toast.makeText(deviceFT2232HContext,"open device port("+openIndex+1+") NG, port_1 == null", Toast.LENGTH_LONG).show();
@@ -586,7 +596,7 @@ public class FT2232HServiceImpl extends Service implements FTService {
 
     public void setConfig(int baud, byte dataBits, byte stopBits, byte parity, byte flowControl, int index) {
         FT_Device ftDev = index == 0 ? port_0 : port_1;
-        if (!ftDev.isOpen()) {
+        if (ftDev == null || !ftDev.isOpen()) {
             Log.e("j2xx", "SetConfig: device not open");
             return;
         }
@@ -693,16 +703,15 @@ public class FT2232HServiceImpl extends Service implements FTService {
         super.onDestroy();
         unregisterReceiver(usbReceiver);
         SERVICE_CONNECTED = false;
-        ftdid2xx = null;
         stopService();
     }
 
     private void stopService() {
-        worker.shutdown();
         bReadThreadGoing_0 = false;
         bReadThreadGoing_1 = false;
         serialPortConnected = false;
         usbDevice = null;
+        ftdid2xx = null;
 
         devCount = -1;
 
@@ -711,10 +720,17 @@ public class FT2232HServiceImpl extends Service implements FTService {
                 port_0.close();
             }
         }
+        port_0 = null;
         if(port_1 != null) {
             if(port_1.isOpen()) {
                 port_1.close();
             }
+        }
+        port_1 = null;
+
+        if (worker != null) {
+            worker.shutdownNow();
+            worker = null;
         }
     }
 
